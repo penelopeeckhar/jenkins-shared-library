@@ -28,6 +28,8 @@ def call(Map config) {
     String image    = config.image
     String registry = config.registry
     String region   = config.region ?: 'us-east-1'
+    // Adaptation AegisCloud : registry locale (registry:2), aucune dépendance AWS
+    boolean isLocal = registry.startsWith('localhost')
 
     echo "Pushing ${image}"
 
@@ -40,11 +42,13 @@ def call(Map config) {
     // Passing it as `--password <token>` instead would place the secret in the
     // process argument list, where any user on the box can read it from
     // `ps aux` and where Docker itself prints a warning about insecure usage.
+    if (!isLocal) {
     sh """
         set -eu
         aws ecr get-login-password --region ${region} \\
           | docker login --username AWS --password-stdin ${registry}
     """
+    }
 
     // --------------------------------------------------------------------------
     // Push
@@ -64,7 +68,24 @@ def call(Map config) {
     String repoName = image.substring(image.indexOf('/') + 1).split(':')[0]
     String imageTag = image.split(':').last()
 
-    String digest = sh(
+    String digest
+    if (isLocal) {
+        digest = sh(
+            script: """
+                curl -fsSI \\
+                    -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \\
+                    -H 'Accept: application/vnd.oci.image.manifest.v1+json' \\
+                    -H 'Accept: application/vnd.oci.image.index.v1+json' \\
+                    http://${registry}/v2/${repoName}/manifests/${imageTag} \\
+                  | grep -i '^docker-content-digest' | cut -d' ' -f2 | tr -d '\\r'
+            """,
+            returnStdout: true
+        ).trim()
+        if (!digest) {
+            error("ecrPush: ${image} introuvable dans la registry locale")
+        }
+    } else {
+    digest = sh(
         script: """
             aws ecr describe-images \\
                 --repository-name ${repoName} \\
@@ -75,6 +96,7 @@ def call(Map config) {
         """,
         returnStdout: true
     ).trim()
+    }
 
     // Always log out. The credential file at ~/.docker/config.json would
     // otherwise persist on the agent between builds.
